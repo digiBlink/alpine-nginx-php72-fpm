@@ -4,10 +4,10 @@ Maintained by [digiBlink](http://digiblink.eu) - [docker hub link](https://hub.d
 
 Container with:
 
-* Alpine Linux 3.6 (default time zone `Europe/Riga`)
-* nginx 1.12.2-r1
-* PHP-FPM 7.2.10 (all necessary extensions to be ready for Wordpress deployment)
-* WP-CLI 2.0.1
+* Alpine Linux 3.8 (default time zone `Europe/Riga`)
+* nginx 1.14.2-r0
+* PHP-FPM 7.2.15 (all necessary extensions to be ready for Wordpress deployment)
+* WP-CLI 2.1.0
 * git
 
 Based on following containers:
