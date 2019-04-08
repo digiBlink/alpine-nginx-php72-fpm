@@ -1,4 +1,4 @@
-FROM alpine:3.8
+FROM alpine:3.9
 
 # persistent / runtime deps
 ENV PHPIZE_DEPS \
@@ -26,12 +26,18 @@ RUN apk add --no-cache --virtual .persistent-deps \
 
 # ensure www-data user exists
 RUN set -x \
-	&& adduser -u 82 -D -S -G www-data www-data
+	&& adduser -u 82 -D -h /DATA -S -G www-data www-data -s /bin/bash
 
 ENV PHP_INI_DIR /usr/local/etc/php
-RUN mkdir -p $PHP_INI_DIR/conf.d
+RUN set -eux; \
+	mkdir -p "$PHP_INI_DIR/conf.d"; \
+# allow running as an arbitrary user (https://github.com/docker-library/php/issues/743)
+	[ ! -d /var/www/html ]; \
+	mkdir -p /var/www/html; \
+	chown www-data:www-data /var/www/html; \
+	chmod 777 /var/www/html
 
-ENV PHP_EXTRA_CONFIGURE_ARGS --enable-fpm --with-fpm-user=nginx --with-fpm-group=www-data --disable-cgi
+ENV PHP_EXTRA_CONFIGURE_ARGS --enable-fpm --with-fpm-user=www-data --with-fpm-group=www-data --disable-cgi
 
 # Apply stack smash protection to functions using local buffers and alloca()
 # Make PHP's main executable position-independent (improves ASLR security mechanism, and has no performance impact on x86_64)
@@ -45,9 +51,9 @@ ENV PHP_LDFLAGS="-Wl,-O1 -Wl,--hash-style=both -pie"
 
 ENV GPG_KEYS 1729F83938DA44E27BA0F4D3DBDB397470D12172 B1B44D8F021E4E2D6021E995DC9FF8D3EE5AF27F
 
-ENV PHP_VERSION 7.2.15
-ENV PHP_URL="https://secure.php.net/get/php-7.2.15.tar.xz/from/this/mirror" PHP_ASC_URL="https://secure.php.net/get/php-7.2.15.tar.xz.asc/from/this/mirror"
-ENV PHP_SHA256="75e90012faef700dffb29311f3d24fa25f1a5e0f70254a9b8d5c794e25e938ce" PHP_MD5=""
+ENV PHP_VERSION 7.2.17
+ENV PHP_URL="https://secure.php.net/get/php-7.2.17.tar.xz/from/this/mirror" PHP_ASC_URL="https://secure.php.net/get/php-7.2.17.tar.xz.asc/from/this/mirror"
+ENV PHP_SHA256="a3e5f51a9ae08813b3925bea3a4de02cd4906fcccf75646e267a213bb63bcf84" PHP_MD5=""
 
 RUN set -xe; \
 	\
@@ -73,22 +79,21 @@ RUN set -xe; \
 		wget -O php.tar.xz.asc "$PHP_ASC_URL"; \
 		export GNUPGHOME="$(mktemp -d)"; \
 		for key in $GPG_KEYS; do \
-			gpg --keyserver pgp.mit.edu --recv-keys "$key" || \
-			gpg --keyserver keyserver.pgp.com --recv-keys "$key" || \
-			gpg --keyserver ha.pool.sks-keyservers.net --recv-keys "$key"; \
+			gpg --batch --keyserver ha.pool.sks-keyservers.net --recv-keys "$key"; \
 		done; \
 		gpg --batch --verify php.tar.xz.asc php.tar.xz; \
 		command -v gpgconf > /dev/null && gpgconf --kill all; \
 		rm -rf "$GNUPGHOME"; \
 	fi; \
 	\
-	apk del .fetch-deps
+	apk del --no-network .fetch-deps
 
 COPY files/docker-php-source /usr/local/bin/
 
 RUN set -xe \
 	&& apk add --no-cache --virtual .build-deps \
 		$PHPIZE_DEPS \
+                argon2-dev \
 		coreutils \
 		curl-dev \
 		libedit-dev \
@@ -122,6 +127,8 @@ RUN set -xe \
 		--enable-mbstring \
 # --enable-mysqlnd is included here because it's harder to compile after the fact than extensions are (since it's a plugin for several extensions, not an extension in itself)
 		--enable-mysqlnd \
+# https://wiki.php.net/rfc/argon2_password_hash (7.2+)
+		--with-password-argon2 \
 # https://wiki.php.net/rfc/libsodium
 		--with-sodium=shared \
 		--enable-zip \
@@ -142,6 +149,7 @@ RUN set -xe \
 		\
 		$PHP_EXTRA_CONFIGURE_ARGS \
 	&& make -j "$(nproc)" \
+        && find -type f -name '*.a' -delete \
 	&& make install \
 	&& { find /usr/local/bin /usr/local/sbin -type f -perm +0111 -exec strip --strip-all '{}' + || true; } \
 	&& make clean \
@@ -154,9 +162,9 @@ RUN set -xe \
 			| sort -u \
 			| awk 'system("[ -e /usr/local/lib/" $1 " ]") == 0 { next } { print "so:" $1 }' \
 	)" \
-	&& apk add --no-cache --virtual .php-rundeps $runDeps \
+	&& apk add --no-cache $runDeps \
 	\
-	&& apk del .build-deps \
+	&& apk del --no-network .build-deps \
 	\
 # https://github.com/docker-library/php/issues/443
 	&& pecl update-channels \
@@ -186,8 +194,6 @@ COPY files/docker-php-ext-* /usr/local/bin/
 
 # sodium was built as a shared module (so that it can be replaced later if so desired), so let's enable it too (https://github.com/docker-library/php/issues/598)
 RUN docker-php-ext-enable sodium
-
-RUN rm -rf /var/cache/apk/*
 
 ENV TERM="xterm" \
     PAGER="more" \
@@ -240,10 +246,10 @@ ADD files/php.ini /usr/local/etc/php/
 ADD files/run.sh /
 RUN chmod +x /run.sh
 
-RUN sed -i "s/nginx:x:100:101:nginx:\/var\/lib\/nginx:\/sbin\/nologin/nginx:x:100:101:nginx:\/DATA:\/bin\/bash/g" /etc/passwd && \
-    sed -i "s/nginx:x:100:101:nginx:\/var\/lib\/nginx:\/sbin\/nologin/nginx:x:100:101:nginx:\/DATA:\/bin\/bash/g" /etc/passwd-
+#RUN sed -i "s/nginx:x:100:101:nginx:\/var\/lib\/nginx:\/sbin\/nologin/nginx:x:100:101:nginx:\/DATA:\/bin\/bash/g" /etc/passwd && \
+#    sed -i "s/nginx:x:100:101:nginx:\/var\/lib\/nginx:\/sbin\/nologin/nginx:x:100:101:nginx:\/DATA:\/bin\/bash/g" /etc/passwd-
 
-RUN curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar && chmod +x wp-cli.phar && mv wp-cli.phar /usr/bin/wp-cli && chown nginx:nginx /usr/bin/wp-cli
+RUN curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar && chmod +x wp-cli.phar && mv wp-cli.phar /usr/bin/wp-cli && chown www-data:www-data /usr/bin/wp-cli
 
 EXPOSE 80
 
