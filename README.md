@@ -6,8 +6,8 @@ Container with:
 
 * Alpine Linux 3.9 (default time zone `Europe/Riga`)
 * nginx 1.14.2-r0
-* PHP-FPM 7.2.17 (all necessary extensions to be ready for Wordpress deployment)
-* WP-CLI 2.1.0
+* PHP-FPM 7.2.19 (all necessary extensions to be ready for Wordpress deployment)
+* WP-CLI 2.2.0
 * git
 
 Based on following containers:
