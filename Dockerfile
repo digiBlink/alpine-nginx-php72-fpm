@@ -1,4 +1,4 @@
-FROM alpine:3.9
+FROM alpine:3.10
 
 # persistent / runtime deps
 ENV PHPIZE_DEPS \
@@ -45,17 +45,17 @@ ENV PHP_EXTRA_CONFIGURE_ARGS --enable-fpm --with-fpm-user=www-data --with-fpm-gr
 # Enable linker optimization (this sorts the hash buckets to improve cache locality, and is non-default)
 # Adds GNU HASH segments to generated executables (this is used if present, and is much faster than sysv hash; in this configuration, sysv hash is also generated)
 # https://github.com/docker-library/php/issues/272
-ENV PHP_CFLAGS="-fstack-protector-strong -fpic -fpie -O2"
+ENV PHP_CFLAGS="-fstack-protector-strong -fpic -fpie -O2 -D_LARGEFILE_SOURCE -D_FILE_OFFSET_BITS=64"
 ENV PHP_CPPFLAGS="$PHP_CFLAGS"
 ENV PHP_LDFLAGS="-Wl,-O1 -Wl,--hash-style=both -pie"
 
 ENV GPG_KEYS 1729F83938DA44E27BA0F4D3DBDB397470D12172 B1B44D8F021E4E2D6021E995DC9FF8D3EE5AF27F
 
-ENV PHP_VERSION 7.2.22
-ENV PHP_URL="https://secure.php.net/get/php-7.2.22.tar.xz/from/this/mirror" PHP_ASC_URL="https://secure.php.net/get/php-7.2.22.tar.xz.asc/from/this/mirror"
-ENV PHP_SHA256="eb597fcf8dc0a6211a42a6346de4f63ee166829a6df6d8ed767fe14be8d1c3a3" PHP_MD5=""
+ENV PHP_VERSION 7.2.25
+ENV PHP_URL="https://secure.php.net/get/php-7.2.25.tar.xz/from/this/mirror" PHP_ASC_URL="https://secure.php.net/get/php-7.2.25.tar.xz.asc/from/this/mirror"
+ENV PHP_SHA256="746efeedc38e6ff7b1ec1432440f5fa801537adf6cd21e4afb3f040e5b0760a9" PHP_MD5=""
 
-RUN set -xe; \
+RUN set -eux; \
 	\
 	apk add --no-cache --virtual .fetch-deps \
 		gnupg \
@@ -90,8 +90,8 @@ RUN set -xe; \
 
 COPY files/docker-php-source /usr/local/bin/
 
-RUN set -xe \
-	&& apk add --no-cache --virtual .build-deps \
+RUN set -eux; \
+	apk add --no-cache --virtual .build-deps \
 		$PHPIZE_DEPS \
                 argon2-dev \
 		coreutils \
@@ -103,14 +103,15 @@ RUN set -xe \
 		sqlite-dev \
 		libpng-dev \
 		libjpeg-turbo-dev \
-	\
-	&& export CFLAGS="$PHP_CFLAGS" \
+	; \
+	export CFLAGS="$PHP_CFLAGS" \
 		CPPFLAGS="$PHP_CPPFLAGS" \
 		LDFLAGS="$PHP_LDFLAGS" \
-	&& docker-php-source extract \
-	&& cd /usr/src/php \
-	&& gnuArch="$(dpkg-architecture --query DEB_BUILD_GNU_TYPE)" \
-	&& ./configure \
+	; \
+	docker-php-source extract; \
+	cd /usr/src/php; \
+	gnuArch="$(dpkg-architecture --query DEB_BUILD_GNU_TYPE)"; \
+	./configure \
 		--build="$gnuArch" \
 		--with-config-file-path="$PHP_INI_DIR" \
 		--with-config-file-scan-dir="$PHP_INI_DIR/conf.d" \
@@ -131,6 +132,8 @@ RUN set -xe \
 		--with-password-argon2 \
 # https://wiki.php.net/rfc/libsodium
 		--with-sodium=shared \
+                --with-pdo-sqlite=/usr \
+		--with-sqlite3=/usr \
 		--enable-zip \
 		--with-curl \
 		--with-libedit \
@@ -148,27 +151,33 @@ RUN set -xe \
 		$(test "$gnuArch" = 's390x-linux-gnu' && echo '--without-pcre-jit') \
 		\
 		$PHP_EXTRA_CONFIGURE_ARGS \
-	&& make -j "$(nproc)" \
-        && find -type f -name '*.a' -delete \
-	&& make install \
-	&& { find /usr/local/bin /usr/local/sbin -type f -perm +0111 -exec strip --strip-all '{}' + || true; } \
-	&& make clean \
-	&& cd / \
-	&& docker-php-source delete \
+	; \
+	make -j "$(nproc)"; \
+        find -type f -name '*.a' -delete; \
+	make install; \
+	find /usr/local/bin /usr/local/sbin -type f -perm +0111 -exec strip --strip-all '{}' + || true; \
+	make clean; \
 	\
-	&& runDeps="$( \
+	cp -v php.ini-* "$PHP_INI_DIR/"; \
+	\
+	cd /; \
+	docker-php-source delete; \
+	\
+	runDeps="$( \
 		scanelf --needed --nobanner --format '%n#p' --recursive /usr/local \
 			| tr ',' '\n' \
 			| sort -u \
 			| awk 'system("[ -e /usr/local/lib/" $1 " ]") == 0 { next } { print "so:" $1 }' \
-	)" \
-	&& apk add --no-cache $runDeps \
+	)"; \
+	apk add --no-cache $runDeps; \
 	\
-	&& apk del --no-network .build-deps \
+	apk del --no-network .build-deps; \
 	\
 # https://github.com/docker-library/php/issues/443
-	&& pecl update-channels \
-	&& rm -rf /tmp/pear ~/.pearrc
+	pecl update-channels; \
+	rm -rf /tmp/pear ~/.pearrc; \
+# smoke test
+	php --version
 
 # set recommended PHP.ini settings
 # see https://secure.php.net/manual/en/opcache.installation.php
@@ -183,12 +192,12 @@ RUN { \
 
 # Set timezone
 ENV TZ Europe/Riga
-RUN apk add --no-cache tzdata \
-	&& cp /usr/share/zoneinfo/$TZ /etc/localtime \
-	&& echo "$TZ" >> /etc/timezone \
-	&& echo "$TZ" >> /etc/TZ \
-	&& date \
-	&& apk del tzdata
+RUN apk add --no-cache tzdata; \
+	cp /usr/share/zoneinfo/$TZ /etc/localtime; \
+	echo "$TZ" >> /etc/timezone; \
+	echo "$TZ" >> /etc/TZ; \
+	date; \
+	apk del tzdata
 
 COPY files/docker-php-ext-* /usr/local/bin/
 
@@ -204,9 +213,9 @@ ENV TERM="xterm" \
 
 ENV PATH /DATA/bin:$PATH
 
-RUN set -ex \
-	&& cd /usr/local/etc \
-	&& if [ -d php-fpm.d ]; then \
+RUN set -eux; \
+	cd /usr/local/etc; \
+	if [ -d php-fpm.d ]; then \
 		# for some reason, upstream's php-fpm.conf.default has "include=NONE/etc/php-fpm.d/*.conf"
 		sed 's!=NONE/!=!g' php-fpm.conf.default | tee php-fpm.conf > /dev/null; \
 		cp php-fpm.d/www.conf.default php-fpm.d/www.conf; \
@@ -218,8 +227,8 @@ RUN set -ex \
 			echo '[global]'; \
 			echo 'include=etc/php-fpm.d/*.conf'; \
 		} | tee php-fpm.conf; \
-	fi \
-	&& { \
+	fi; \
+	{ \
 		echo '[global]'; \
 		echo 'error_log = /proc/self/fd/2'; \
 		echo; \
@@ -231,8 +240,8 @@ RUN set -ex \
 		echo; \
 		echo '; Ensure worker stdout and stderr are sent to the main error log.'; \
 		echo 'catch_workers_output = yes'; \
-	} | tee php-fpm.d/docker.conf \
-	&& { \
+	} | tee php-fpm.d/docker.conf; \
+	{ \
 		echo '[global]'; \
 		echo 'daemonize = no'; \
 		echo; \
