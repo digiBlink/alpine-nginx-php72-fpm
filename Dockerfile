@@ -1,6 +1,7 @@
-FROM alpine:3.11
+FROM alpine:3.12
 
-# persistent / runtime deps
+# dependencies required for running "phpize"
+# these get automatically installed and removed by "docker-php-ext-*" (unless they're already installed)
 ENV PHPIZE_DEPS \
 		autoconf \
 		dpkg-dev dpkg \
@@ -12,21 +13,26 @@ ENV PHPIZE_DEPS \
 		pkgconf \
 		re2c
 
-RUN apk add --no-cache --virtual .persistent-deps \
-		nginx \
+# persistent / runtime deps
+RUN apk add --no-cache \
+                nginx \
 		ca-certificates \
-		bash \
-		sed \
+                bash \
+                sed \
 		curl \
 		tar \
 		xz \
-		git \
-		libressl \
-		openssh
+                git \
+                libressl \
+                openssh
 
 # ensure www-data user exists
-RUN set -x \
-	&& adduser -u 82 -D -h /DATA -S -G www-data www-data -s /bin/bash
+RUN set -eux; \
+	adduser -u 82 -D -h /DATA -S -G www-data www-data -s /bin/bash
+# 82 is the standard uid/gid for "www-data" in Alpine
+# https://git.alpinelinux.org/aports/tree/main/apache2/apache2.pre-install?h=3.9-stable
+# https://git.alpinelinux.org/aports/tree/main/lighttpd/lighttpd.pre-install?h=3.9-stable
+# https://git.alpinelinux.org/aports/tree/main/nginx/nginx.pre-install?h=3.9-stable
 
 ENV PHP_INI_DIR /usr/local/etc/php
 RUN set -eux; \
@@ -43,46 +49,39 @@ ENV PHP_EXTRA_CONFIGURE_ARGS --enable-fpm --with-fpm-user=www-data --with-fpm-gr
 # Make PHP's main executable position-independent (improves ASLR security mechanism, and has no performance impact on x86_64)
 # Enable optimization (-O2)
 # Enable linker optimization (this sorts the hash buckets to improve cache locality, and is non-default)
-# Adds GNU HASH segments to generated executables (this is used if present, and is much faster than sysv hash; in this configuration, sysv hash is also generated)
 # https://github.com/docker-library/php/issues/272
+# -D_LARGEFILE_SOURCE and -D_FILE_OFFSET_BITS=64 (https://www.php.net/manual/en/intro.filesystem.php)
 ENV PHP_CFLAGS="-fstack-protector-strong -fpic -fpie -O2 -D_LARGEFILE_SOURCE -D_FILE_OFFSET_BITS=64"
 ENV PHP_CPPFLAGS="$PHP_CFLAGS"
 ENV PHP_LDFLAGS="-Wl,-O1 -Wl,--hash-style=both -pie"
 
 ENV GPG_KEYS 1729F83938DA44E27BA0F4D3DBDB397470D12172 B1B44D8F021E4E2D6021E995DC9FF8D3EE5AF27F
 
-ENV PHP_VERSION 7.2.26
-ENV PHP_URL="https://secure.php.net/get/php-7.2.26.tar.xz/from/this/mirror" PHP_ASC_URL="https://secure.php.net/get/php-7.2.26.tar.xz.asc/from/this/mirror"
-ENV PHP_SHA256="1dd3bc875e105f5c9d21fb4dc240670bd2c22037820ff03890f5ab883c88b78d" PHP_MD5=""
+ENV PHP_VERSION 7.2.34
+ENV PHP_URL="https://www.php.net/distributions/php-7.2.34.tar.xz" PHP_ASC_URL="https://www.php.net/distributions/php-7.2.34.tar.xz.asc"
+ENV PHP_SHA256="409e11bc6a2c18707dfc44bc61c820ddfd81e17481470f3405ee7822d8379903"
 
 RUN set -eux; \
 	\
-	apk add --no-cache --virtual .fetch-deps \
-		gnupg \
-		wget \
-		openssl \
-	; \
+	apk add --no-cache --virtual .fetch-deps gnupg; \
 	\
 	mkdir -p /usr/src; \
 	cd /usr/src; \
 	\
-	wget -O php.tar.xz "$PHP_URL"; \
+	curl -fsSL -o php.tar.xz "$PHP_URL"; \
 	\
 	if [ -n "$PHP_SHA256" ]; then \
 		echo "$PHP_SHA256 *php.tar.xz" | sha256sum -c -; \
 	fi; \
-	if [ -n "$PHP_MD5" ]; then \
-		echo "$PHP_MD5 *php.tar.xz" | md5sum -c -; \
-	fi; \
 	\
 	if [ -n "$PHP_ASC_URL" ]; then \
-		wget -O php.tar.xz.asc "$PHP_ASC_URL"; \
+		curl -fsSL -o php.tar.xz.asc "$PHP_ASC_URL"; \
 		export GNUPGHOME="$(mktemp -d)"; \
 		for key in $GPG_KEYS; do \
 			gpg --batch --keyserver ha.pool.sks-keyservers.net --recv-keys "$key"; \
 		done; \
 		gpg --batch --verify php.tar.xz.asc php.tar.xz; \
-		command -v gpgconf > /dev/null && gpgconf --kill all; \
+		gpgconf --kill all; \
 		rm -rf "$GNUPGHOME"; \
 	fi; \
 	\
@@ -93,17 +92,18 @@ COPY files/docker-php-source /usr/local/bin/
 RUN set -eux; \
 	apk add --no-cache --virtual .build-deps \
 		$PHPIZE_DEPS \
-                argon2-dev \
+		argon2-dev \
 		coreutils \
 		curl-dev \
 		libedit-dev \
-		libressl-dev \
 		libsodium-dev \
 		libxml2-dev \
+		libressl-dev \
 		sqlite-dev \
-		libpng-dev \
-		libjpeg-turbo-dev \
+                libpng-dev \
+                libjpeg-turbo-dev \
 	; \
+	\
 	export CFLAGS="$PHP_CFLAGS" \
 		CPPFLAGS="$PHP_CPPFLAGS" \
 		LDFLAGS="$PHP_LDFLAGS" \
@@ -116,11 +116,14 @@ RUN set -eux; \
 		--with-config-file-path="$PHP_INI_DIR" \
 		--with-config-file-scan-dir="$PHP_INI_DIR/conf.d" \
 		\
-# make sure invalid --configure-flags are fatal errors intead of just warnings
+# make sure invalid --configure-flags are fatal errors instead of just warnings
 		--enable-option-checking=fatal \
 		\
 # https://github.com/docker-library/php/issues/439
 		--with-mhash \
+		\
+# https://github.com/docker-library/php/issues/822
+		--with-pic \
 		\
 # --enable-ftp is included here because ftp_ssl_connect() needs ftp to be compiled statically (see https://github.com/docker-library/php/issues/236)
 		--enable-ftp \
@@ -132,32 +135,34 @@ RUN set -eux; \
 		--with-password-argon2 \
 # https://wiki.php.net/rfc/libsodium
 		--with-sodium=shared \
-                --with-pdo-sqlite=/usr \
+# always build against system sqlite3 (https://github.com/php/php-src/commit/6083a387a81dbbd66d6316a3a12a63f06d5f7109)
+		--with-pdo-sqlite=/usr \
 		--with-sqlite3=/usr \
 		--enable-zip \
 		--with-curl \
 		--with-libedit \
 		--with-openssl \
 		--with-zlib \
-		--with-mysqli \
-		--with-pdo-mysql \
-		--with-gd \
-		--with-png-dir \
-		--with-jpeg-dir \
-		--enable-opcache \
+                --with-mysqli \
+                --with-pdo-mysql \
+                --with-gd \
+                --with-png-dir \
+                --with-jpeg-dir \
+                --enable-opcache \
 		\
 # bundled pcre does not support JIT on s390x
 # https://manpages.debian.org/stretch/libpcre3-dev/pcrejit.3.en.html#AVAILABILITY_OF_JIT_SUPPORT
-		$(test "$gnuArch" = 's390x-linux-gnu' && echo '--without-pcre-jit') \
+		$(test "$gnuArch" = 's390x-linux-musl' && echo '--without-pcre-jit') \
 		\
-		$PHP_EXTRA_CONFIGURE_ARGS \
+		${PHP_EXTRA_CONFIGURE_ARGS:-} \
 	; \
 	make -j "$(nproc)"; \
-        find -type f -name '*.a' -delete; \
+	find -type f -name '*.a' -delete; \
 	make install; \
 	find /usr/local/bin /usr/local/sbin -type f -perm +0111 -exec strip --strip-all '{}' + || true; \
 	make clean; \
 	\
+# https://github.com/docker-library/php/issues/692 (copy default example "php.ini" files somewhere easily discoverable)
 	cp -v php.ini-* "$PHP_INI_DIR/"; \
 	\
 	cd /; \
@@ -173,31 +178,23 @@ RUN set -eux; \
 	\
 	apk del --no-network .build-deps; \
 	\
-# https://github.com/docker-library/php/issues/443
+# update pecl channel definitions https://github.com/docker-library/php/issues/443
 	pecl update-channels; \
 	rm -rf /tmp/pear ~/.pearrc; \
+	\
 # smoke test
 	php --version
 
 # set recommended PHP.ini settings
 # see https://secure.php.net/manual/en/opcache.installation.php
 RUN { \
-		echo 'opcache.memory_consumption=128'; \
-		echo 'opcache.interned_strings_buffer=8'; \
-		echo 'opcache.max_accelerated_files=4000'; \
-		echo 'opcache.revalidate_freq=2'; \
-		echo 'opcache.fast_shutdown=1'; \
-		echo 'opcache.enable_cli=1'; \
-	} > /usr/local/etc/php/conf.d/opcache-recommended.ini
-
-# Set timezone
-ENV TZ Europe/Riga
-RUN apk add --no-cache tzdata; \
-	cp /usr/share/zoneinfo/$TZ /etc/localtime; \
-	echo "$TZ" >> /etc/timezone; \
-	echo "$TZ" >> /etc/TZ; \
-	date; \
-	apk del tzdata
+                echo 'opcache.memory_consumption=128'; \
+                echo 'opcache.interned_strings_buffer=8'; \
+                echo 'opcache.max_accelerated_files=4000'; \
+                echo 'opcache.revalidate_freq=2'; \
+                echo 'opcache.fast_shutdown=1'; \
+                echo 'opcache.enable_cli=1'; \
+        } > /usr/local/etc/php/conf.d/opcache-recommended.ini
 
 COPY files/docker-php-ext-* /usr/local/bin/
 
@@ -255,10 +252,11 @@ ADD files/php.ini /usr/local/etc/php/
 ADD files/run.sh /
 RUN chmod +x /run.sh
 
-#RUN sed -i "s/nginx:x:100:101:nginx:\/var\/lib\/nginx:\/sbin\/nologin/nginx:x:100:101:nginx:\/DATA:\/bin\/bash/g" /etc/passwd && \
-#    sed -i "s/nginx:x:100:101:nginx:\/var\/lib\/nginx:\/sbin\/nologin/nginx:x:100:101:nginx:\/DATA:\/bin\/bash/g" /etc/passwd-
-
 RUN curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar && chmod +x wp-cli.phar && mv wp-cli.phar /usr/bin/wp-cli && chown www-data:www-data /usr/bin/wp-cli
+
+# Override stop signal to stop process gracefully
+# https://github.com/php/php-src/blob/17baa87faddc2550def3ae7314236826bc1b1398/sapi/fpm/php-fpm.8.in#L163
+STOPSIGNAL SIGQUIT
 
 EXPOSE 80
 
